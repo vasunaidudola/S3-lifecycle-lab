@@ -1,3 +1,4 @@
+# .github/workflows/S3-create-lifecycle.yml
 name: S3 Lifecycle: create bucket + apply Glacier transition (us-east-1)
 
 on:
@@ -95,24 +96,4 @@ EOF
         "arn:aws:s3:::BUCKET_PLACEHOLDER/*"
       ],
       "Condition": {
-        "Bool": { "aws:SecureTransport": "false" }
-      }
-    }
-  ]
-}
-EOF
-          sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" bucket-policy.json
-          cat bucket-policy.json
-
-      - name: Apply bucket policy
-        run: |
-          aws s3api put-bucket-policy --bucket "${BUCKET}" --policy file://bucket-policy.json
-          echo "Bucket policy applied (deny non-HTTPS)."
-
-      - name: Verify lifecycle configuration
-        run: |
-          echo "Current lifecycle config for ${BUCKET}:"
-          aws s3api get-bucket-lifecycle-configuration --bucket "${BUCKET}" || echo "No lifecycle found or retrieval failed"
-
-      - name: Done
-        run: echo "S3 bucket ${BUCKET} ready with lifecycle (transition -> GLACIER after ${DAYS_TO_TRANSITION} days) and TLS-only policy. Region: ${AWS_REGION}"
+        "Bool": { "aws:SecureTranspor
