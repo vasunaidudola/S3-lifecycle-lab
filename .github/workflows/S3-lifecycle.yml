@@ -1,21 +1,22 @@
-name: S3 create + lifecycle -> GLACIER (us-east-1)
+name: S3 lifecycle -> GLACIER (us-east-1)
 
 on:
   workflow_dispatch:
-
-env:
-  AWS_REGION: us-east-1
-  DAYS_TO_TRANSITION: "90"
+    inputs:
+      days:
+        description: 'Days before transition to Glacier'
+        required: false
+        default: '90'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
+      AWS_REGION: us-east-1
       BUCKET: ${{ secrets.BUCKET_NAME }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      DAYS: ${{ github.event.inputs.days }}
 
+    steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -23,32 +24,31 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create bucket, enable versioning, apply lifecycle & policy
+      - name: Create bucket (if missing), apply lifecycle and TLS-only policy
         run: |
           set -euo pipefail
-
-          # variables
           BUCKET="${BUCKET}"
-          DAYS="${DAYS_TO_TRANSITION}"
+          DAYS="${DAYS}"
+          REGION="${AWS_REGION}"
 
-          # create bucket (us-east-1 special case)
+          # create bucket if missing (us-east-1 special-case)
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Bucket $BUCKET already exists"
+            echo "Bucket $BUCKET exists"
           else
-            echo "Creating bucket $BUCKET in us-east-1"
-            aws s3api create-bucket --bucket "$BUCKET"
+            echo "Creating bucket $BUCKET in $REGION"
+            if [ "$REGION" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET"
+            else
+              aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration LocationConstraint="$REGION"
+            fi
           fi
 
-          # enable versioning
-          aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
-          echo "Versioning enabled on $BUCKET"
-
-          # lifecycle JSON - transition to GLACIER after $DAYS days
+          # lifecycle JSON -> transition to GLACIER after DAYS
           cat > /tmp/lifecycle.json <<'LIFE'
 {
   "Rules": [
     {
-      "ID": "move-to-glacier",
+      "ID": "transition-to-glacier",
       "Status": "Enabled",
       "Filter": { "Prefix": "" },
       "Transitions": [
@@ -56,15 +56,14 @@ jobs:
           "Days": PLACEHOLDER_DAYS,
           "StorageClass": "GLACIER"
         }
-      ],
-      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+      ]
     }
   ]
 }
 LIFE
           sed -i "s/PLACEHOLDER_DAYS/${DAYS}/g" /tmp/lifecycle.json
           aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file:///tmp/lifecycle.json
-          echo "Lifecycle applied (transition to GLACIER after ${DAYS} days)"
+          echo "Lifecycle applied (transition to GLACIER after ${DAYS} days)."
 
           # TLS-only bucket policy
           cat > /tmp/policy.json <<'POL'
@@ -89,4 +88,4 @@ LIFE
 POL
           sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" /tmp/policy.json
           aws s3api put-bucket-policy --bucket "$BUCKET" --policy file:///tmp/policy.json
-          echo "Bucket policy applied (deny non-HTTPS)"
+          echo "Bucket policy applied (deny non-HTTPS)."
