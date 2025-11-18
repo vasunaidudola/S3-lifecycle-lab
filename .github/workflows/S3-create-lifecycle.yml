@@ -17,7 +17,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: arn:aws:iam::504956527880:oidc-provider/token.actions.githubusercontent.com
+          role-to-assume: arn:aws:iam::504956527880:role/GitHubOIDCRole
           aws-region: us-east-1
  
       - name: Create S3 bucket if not exists
