@@ -1,10 +1,10 @@
-name: s3-lifecycle-glacier-with-test
+name: s3-lifecycle-glacier-manual
 
 on:
   workflow_dispatch:
     inputs:
       days:
-        description: days before transition to Glacier (use 1 to test quickly)
+        description: Days before transition to Glacier (use 1 to test quickly)
         required: false
         default: "90"
 
@@ -24,18 +24,18 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create bucket, apply lifecycle, upload test file
+      - name: Create bucket, apply lifecycle, policy, upload test object
         run: |
           set -euo pipefail
-
           BUCKET="${BUCKET}"
           DAYS="${DAYS}"
           REGION="${AWS_REGION}"
 
-          # Create bucket if missing
+          # create bucket if missing (us-east-1 special case)
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Bucket exists"
+            echo "Bucket $BUCKET exists"
           else
+            echo "Creating bucket $BUCKET in $REGION"
             if [ "$REGION" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "$BUCKET"
             else
@@ -43,7 +43,7 @@ jobs:
             fi
           fi
 
-          # Create lifecycle JSON (clean, multi-line format)
+          # lifecycle JSON (multi-line, readable)
           cat > /tmp/lifecycle.json <<EOF
 {
   "Rules": [
@@ -58,20 +58,17 @@ jobs:
           "Days": ${DAYS},
           "StorageClass": "GLACIER"
         }
-      ]
+      ],
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
     }
   ]
 }
 EOF
 
-          # Apply lifecycle
-          aws s3api put-bucket-lifecycle-configuration \
-            --bucket "$BUCKET" \
-            --lifecycle-configuration file:///tmp/lifecycle.json
-
+          aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file:///tmp/lifecycle.json
           echo "Applied lifecycle: transition to GLACIER after ${DAYS} days"
 
-          # Create bucket policy JSON (multi-line readable)
+          # bucket policy (TLS-only)
           cat > /tmp/policy.json <<EOF
 {
   "Version": "2012-10-17",
@@ -93,19 +90,15 @@ EOF
 }
 EOF
 
-          # Apply bucket policy
           aws s3api put-bucket-policy --bucket "$BUCKET" --policy file:///tmp/policy.json
           echo "Applied TLS-only bucket policy"
 
-          # Upload test file
+          # upload a test object
           TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
           KEY="tests/s3-test-${TIMESTAMP}.txt"
-          echo "Test object created at $TIMESTAMP" > /tmp/s3-test.txt
+          echo "github actions test ${TIMESTAMP}" > /tmp/s3-test.txt
           aws s3 cp /tmp/s3-test.txt s3://"$BUCKET"/"$KEY"
+          echo "Uploaded s3://$BUCKET/$KEY"
 
-          echo "Uploaded test object: s3://$BUCKET/$KEY"
-
-          # Show object metadata
-          aws s3api head-object --bucket "$BUCKET" --key "$KEY" \
-            --query '{Key:Key,StorageClass:StorageClass,LastModified:LastModified}' \
-            --output json
+          # print object metadata
+          aws s3api head-object --bucket "$BUCKET" --key "$KEY" --query '{Key:Key,StorageClass:StorageClass,LastModified:LastModified,Restore:Restore}' --output json
