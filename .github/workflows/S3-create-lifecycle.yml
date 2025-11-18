@@ -39,7 +39,7 @@ jobs:
       - name: Put bucket policy (require HTTPS and SSE)
         run: |
           BUCKET=vasu-bucket-sourabh
-          cat > policy.json <<'POL'
+          cat > policy.json <<POL
           {
             "Version": "2012-10-17",
             "Statement": [
