@@ -1,98 +1,118 @@
-name: s3-create-and-lifecycle
- 
+name: S3 Lifecycle: create bucket + apply Glacier transition (us-east-1)
+
 on:
   workflow_dispatch:
- 
-permissions:
-  id-token: write
-  contents: read
- 
+
 jobs:
-  setup-s3:
+  deploy:
     runs-on: ubuntu-latest
+    env:
+      BUCKET: ${{ secrets.BUCKET_NAME }}
+      AWS_REGION: us-east-1
+      # Set to 90 for production; set to 1 for quick testing
+      DAYS_TO_TRANSITION: 90
+
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
- 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v5
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: arn:aws:iam::504956527880:role/GitHubOIDCRole
-          aws-region: us-east-1
- 
-      - name: Create S3 bucket if not exists
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create S3 bucket if not exists (handles us-east-1)
+        id: create_bucket
         run: |
-          set -e
-          BUCKET=vasu-bucket-sourabh
-          REGION=us-east-1
+          set -euo pipefail
+          BUCKET="${BUCKET}"
+          REGION="${AWS_REGION}"
+
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Bucket exists: $BUCKET"
+            echo "Bucket $BUCKET already exists and is reachable."
           else
+            echo "Bucket $BUCKET does not exist — creating..."
+            # For us-east-1 AWS expects no LocationConstraint argument
             if [ "$REGION" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "$BUCKET"
             else
               aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration LocationConstraint="$REGION"
             fi
-            echo "Created $BUCKET"
+            echo "Created bucket $BUCKET in $REGION"
           fi
- 
-      - name: Put bucket policy (require HTTPS and SSE)
+
+      - name: Enable versioning on bucket (optional but recommended)
         run: |
-          BUCKET=vasu-bucket-sourabh
-          cat > policy.json <<POL
-          {
-            "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Sid": "DenyHttpRequests",
-                "Effect": "Deny",
-                "Principal": "*",
-                "Action": "s3:*",
-                "Resource": [
-                  "arn:aws:s3:::$BUCKET",
-                  "arn:aws:s3:::$BUCKET/*"
-                ],
-                "Condition": {
-                  "Bool": { "aws:SecureTransport": "false" }
-                }
-              },
-              {
-                "Sid": "DenyUnencryptedUploads",
-                "Effect": "Deny",
-                "Principal": "*",
-                "Action": "s3:PutObject",
-                "Resource": "arn:aws:s3:::$BUCKET/*",
-                "Condition": {
-                  "StringNotEquals": {
-                    "s3:x-amz-server-side-encryption": "AES256"
-                  }
-                }
-              }
-            ]
-          }
-          POL
-          aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://policy.json
- 
-      - name: Put lifecycle configuration (move to Glacier in 90 days)
+          aws s3api put-bucket-versioning --bucket "${BUCKET}" --versioning-configuration Status=Enabled
+          echo "Versioning enabled on ${BUCKET}"
+
+      - name: Write lifecycle JSON
         run: |
-          BUCKET=REPLACE_BUCKET_NAME
-          cat > lifecycle.json <<'LIFE'
-          {
-            "Rules": [
-              {
-                "ID": "MoveToGlacierAfter90Days",
-                "Status": "Enabled",
-                "Filter": { "Prefix": "" },
-                "Transitions": [
-                  { "Days": 90, "StorageClass": "GLACIER" }
-                ],
-                "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
-              }
-            ]
-          }
-          LIFE
-          aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file://lifecycle.json
- 
-      - name: Verify lifecycle config
+          cat > lifecycle.json <<'EOF'
+{
+  "Rules": [
+    {
+      "ID": "move-to-glacier-90-days",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "Transitions": [
+        {
+          "Days": DAYS_PLACEHOLDER,
+          "StorageClass": "GLACIER"
+        }
+      ],
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
+EOF
+          sed -i "s/DAYS_PLACEHOLDER/${DAYS_TO_TRANSITION}/g" lifecycle.json
+          echo "Lifecycle file created (transitions after ${DAYS_TO_TRANSITION} days)."
+          cat lifecycle.json
+
+      - name: Apply lifecycle configuration
         run: |
-          aws s3api get-bucket-lifecycle-configuration --bucket REPLACE_BUCKET_NAME || true
+          aws s3api put-bucket-lifecycle-configuration \
+            --bucket "${BUCKET}" \
+            --lifecycle-configuration file://lifecycle.json
+          echo "Lifecycle configuration applied to ${BUCKET}"
+
+      - name: Write bucket policy (deny non-HTTPS)
+        run: |
+          cat > bucket-policy.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyNonTLSRequests",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::BUCKET_PLACEHOLDER",
+        "arn:aws:s3:::BUCKET_PLACEHOLDER/*"
+      ],
+      "Condition": {
+        "Bool": { "aws:SecureTransport": "false" }
+      }
+    }
+  ]
+}
+EOF
+          sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" bucket-policy.json
+          cat bucket-policy.json
+
+      - name: Apply bucket policy
+        run: |
+          aws s3api put-bucket-policy --bucket "${BUCKET}" --policy file://bucket-policy.json
+          echo "Bucket policy applied (deny non-HTTPS)."
+
+      - name: Verify lifecycle configuration
+        run: |
+          echo "Current lifecycle config for ${BUCKET}:"
+          aws s3api get-bucket-lifecycle-configuration --bucket "${BUCKET}" || echo "No lifecycle found or retrieval failed"
+
+      - name: Done
+        run: echo "S3 bucket ${BUCKET} ready with lifecycle (transition -> GLACIER after ${DAYS_TO_TRANSITION} days) and TLS-only policy. Region: ${AWS_REGION}"
