@@ -6,7 +6,7 @@ on:
       days:
         description: days before transition to Glacier (use 1 to test quickly)
         required: true
-        default: "90"
+        
 
 jobs:
   deploy:
