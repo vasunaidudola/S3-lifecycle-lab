@@ -12,7 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BUCKET: ${{ secrets.BUCKET_NAME }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,26 +23,28 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create bucket if missing (us-east-1)
+      - name: Create bucket, enable versioning, apply lifecycle & policy
         run: |
           set -euo pipefail
+
+          # variables
+          BUCKET="${BUCKET}"
+          DAYS="${DAYS_TO_TRANSITION}"
+
+          # create bucket (us-east-1 special case)
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Bucket $BUCKET exists"
+            echo "Bucket $BUCKET already exists"
           else
             echo "Creating bucket $BUCKET in us-east-1"
             aws s3api create-bucket --bucket "$BUCKET"
           fi
 
-      - name: Enable versioning (optional)
-        run: |
-          aws s3api put-bucket-versioning --bucket "$BUCKET" \
-            --versioning-configuration Status=Enabled
+          # enable versioning
+          aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
           echo "Versioning enabled on $BUCKET"
 
-      - name: Apply lifecycle -> GLACIER after days
-        run: |
-          # create lifecycle file with placeholder for days
-          cat > lifecycle.json <<'JSON'
+          # lifecycle JSON - transition to GLACIER after $DAYS days
+          cat > /tmp/lifecycle.json <<'LIFE'
 {
   "Rules": [
     {
@@ -52,7 +53,7 @@ jobs:
       "Filter": { "Prefix": "" },
       "Transitions": [
         {
-          "Days": DAYS_PLACEHOLDER,
+          "Days": PLACEHOLDER_DAYS,
           "StorageClass": "GLACIER"
         }
       ],
@@ -60,16 +61,13 @@ jobs:
     }
   ]
 }
-JSON
-          # replace placeholder using shell variable
-          sed -i "s/DAYS_PLACEHOLDER/${DAYS_TO_TRANSITION}/g" lifecycle.json
-          aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file://lifecycle.json
-          echo "Applied lifecycle (transition to GLACIER after ${DAYS_TO_TRANSITION} days)."
-          cat lifecycle.json
+LIFE
+          sed -i "s/PLACEHOLDER_DAYS/${DAYS}/g" /tmp/lifecycle.json
+          aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file:///tmp/lifecycle.json
+          echo "Lifecycle applied (transition to GLACIER after ${DAYS} days)"
 
-      - name: Apply bucket policy (deny non-HTTPS)
-        run: |
-          cat > policy.json <<'POL'
+          # TLS-only bucket policy
+          cat > /tmp/policy.json <<'POL'
 {
   "Version":"2012-10-17",
   "Statement":[
@@ -89,10 +87,6 @@ JSON
   ]
 }
 POL
-          sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" policy.json
-          aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://policy.json
-          echo "Bucket policy applied (deny non-HTTPS)."
-
-      - name: Verify lifecycle config
-        run: |
-          aws s3api get-bucket-lifecycle-configuration --bucket "$BUCKET" || echo "No lifecycle found"
+          sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" /tmp/policy.json
+          aws s3api put-bucket-policy --bucket "$BUCKET" --policy file:///tmp/policy.json
+          echo "Bucket policy applied (deny non-HTTPS)"
