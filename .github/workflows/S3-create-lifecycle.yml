@@ -1,0 +1,98 @@
+name: s3-create-and-lifecycle
+ 
+on:
+  workflow_dispatch:
+ 
+permissions:
+  id-token: write
+  contents: read
+ 
+jobs:
+  setup-s3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+ 
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::504956527880:oidc-provider/token.actions.githubusercontent.com
+          aws-region: us-east-1
+ 
+      - name: Create S3 bucket if not exists
+        run: |
+          set -e
+          BUCKET=vasu-bucket-sourabh
+          REGION=us-east-1
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "Bucket exists: $BUCKET"
+          else
+            if [ "$REGION" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$BUCKET"
+            else
+              aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration LocationConstraint="$REGION"
+            fi
+            echo "Created $BUCKET"
+          fi
+ 
+      - name: Put bucket policy (require HTTPS and SSE)
+        run: |
+          BUCKET=vasu-bucket-sourabh
+          cat > policy.json <<'POL'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "DenyHttpRequests",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "s3:*",
+                "Resource": [
+                  "arn:aws:s3:::$BUCKET",
+                  "arn:aws:s3:::$BUCKET/*"
+                ],
+                "Condition": {
+                  "Bool": { "aws:SecureTransport": "false" }
+                }
+              },
+              {
+                "Sid": "DenyUnencryptedUploads",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "s3:PutObject",
+                "Resource": "arn:aws:s3:::$BUCKET/*",
+                "Condition": {
+                  "StringNotEquals": {
+                    "s3:x-amz-server-side-encryption": "AES256"
+                  }
+                }
+              }
+            ]
+          }
+          POL
+          aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://policy.json
+ 
+      - name: Put lifecycle configuration (move to Glacier in 90 days)
+        run: |
+          BUCKET=REPLACE_BUCKET_NAME
+          cat > lifecycle.json <<'LIFE'
+          {
+            "Rules": [
+              {
+                "ID": "MoveToGlacierAfter90Days",
+                "Status": "Enabled",
+                "Filter": { "Prefix": "" },
+                "Transitions": [
+                  { "Days": 90, "StorageClass": "GLACIER" }
+                ],
+                "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+              }
+            ]
+          }
+          LIFE
+          aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file://lifecycle.json
+ 
+      - name: Verify lifecycle config
+        run: |
+          aws s3api get-bucket-lifecycle-configuration --bucket REPLACE_BUCKET_NAME || true
