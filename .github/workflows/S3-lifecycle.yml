@@ -1,0 +1,96 @@
+name: S3 create + lifecycle -> GLACIER (us-east-1)
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  DAYS_TO_TRANSITION: 90         # production value
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      BUCKET: ${{ secrets.BUCKET_NAME }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Create bucket if missing (handles us-east-1)
+        run: |
+          set -euo pipefail
+          if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            echo "Bucket $BUCKET exists"
+          else
+            echo "Creating bucket $BUCKET in us-east-1"
+            aws s3api create-bucket --bucket "$BUCKET"
+          fi
+
+      - name: Enable versioning (optional)
+        run: |
+          aws s3api put-bucket-versioning --bucket "$BUCKET" \
+            --versioning-configuration Status=Enabled
+          echo "Versioning enabled on $BUCKET"
+
+      - name: Apply lifecycle -> GLACIER after 90 days
+        run: |
+          cat > lifecycle.json <<'EOF'
+{
+  "Rules": [
+    {
+      "ID": "move-to-glacier-after-90-days",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "Transitions": [
+        {
+          "Days": DAYS_PLACEHOLDER,
+          "StorageClass": "GLACIER"
+        }
+      ],
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
+EOF
+          sed -i "s/DAYS_PLACEHOLDER/${DAYS_TO_TRANSITION}/g" lifecycle.json
+          aws s3api put-bucket-lifecycle-configuration \
+            --bucket "$BUCKET" \
+            --lifecycle-configuration file://lifecycle.json
+          echo "Lifecycle applied (transition to GLACIER after ${DAYS_TO_TRANSITION} days)"
+
+      - name: Apply bucket policy (deny non-HTTPS)
+        run: |
+          cat > policy.json <<'EOF'
+{
+  "Version":"2012-10-17",
+  "Statement":[
+    {
+      "Sid":"DenyNonTLSRequests",
+      "Effect":"Deny",
+      "Principal":"*",
+      "Action":"s3:*",
+      "Resource":[
+        "arn:aws:s3:::BUCKET_PLACEHOLDER",
+        "arn:aws:s3:::BUCKET_PLACEHOLDER/*"
+      ],
+      "Condition":{
+        "Bool":{"aws:SecureTransport":"false"}
+      }
+    }
+  ]
+}
+EOF
+          sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" policy.json
+          aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://policy.json
+          echo "Bucket policy applied (deny non-HTTPS)"
+
+      - name: Verify lifecycle config
+        run: aws s3api get-bucket-lifecycle-configuration --bucket "$BUCKET" || echo "No lifecycle found"
