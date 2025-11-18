@@ -1,12 +1,12 @@
-name: S3 lifecycle -> GLACIER (us-east-1)
+name: s3-lifecycle-glacier
 
 on:
   workflow_dispatch:
     inputs:
       days:
-        description: 'Days before transition to Glacier'
+        description: days before transition to Glacier
         required: false
-        default: '90'
+        default: "90"
 
 jobs:
   deploy:
@@ -15,77 +15,36 @@ jobs:
       AWS_REGION: us-east-1
       BUCKET: ${{ secrets.BUCKET_NAME }}
       DAYS: ${{ github.event.inputs.days }}
-
     steps:
-      - name: Configure AWS credentials
+      - name: configure-aws
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create bucket (if missing), apply lifecycle and TLS-only policy
+      - name: create-and-configure-bucket
         run: |
           set -euo pipefail
           BUCKET="${BUCKET}"
           DAYS="${DAYS}"
           REGION="${AWS_REGION}"
-
-          # create bucket if missing (us-east-1 special-case)
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-            echo "Bucket $BUCKET exists"
+            echo "bucket exists"
           else
-            echo "Creating bucket $BUCKET in $REGION"
             if [ "$REGION" = "us-east-1" ]; then
               aws s3api create-bucket --bucket "$BUCKET"
             else
               aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration LocationConstraint="$REGION"
             fi
           fi
-
-          # lifecycle JSON -> transition to GLACIER after DAYS
           cat > /tmp/lifecycle.json <<'LIFE'
-{
-  "Rules": [
-    {
-      "ID": "transition-to-glacier",
-      "Status": "Enabled",
-      "Filter": { "Prefix": "" },
-      "Transitions": [
-        {
-          "Days": PLACEHOLDER_DAYS,
-          "StorageClass": "GLACIER"
-        }
-      ]
-    }
-  ]
-}
+{"Rules":[{"ID":"transition-to-glacier","Status":"Enabled","Filter":{"Prefix":""},"Transitions":[{"Days":PLACEHOLDER_DAYS,"StorageClass":"GLACIER"}]}]}
 LIFE
           sed -i "s/PLACEHOLDER_DAYS/${DAYS}/g" /tmp/lifecycle.json
           aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file:///tmp/lifecycle.json
-          echo "Lifecycle applied (transition to GLACIER after ${DAYS} days)."
-
-          # TLS-only bucket policy
           cat > /tmp/policy.json <<'POL'
-{
-  "Version":"2012-10-17",
-  "Statement":[
-    {
-      "Sid":"DenyNonTLSRequests",
-      "Effect":"Deny",
-      "Principal":"*",
-      "Action":"s3:*",
-      "Resource":[
-        "arn:aws:s3:::BUCKET_PLACEHOLDER",
-        "arn:aws:s3:::BUCKET_PLACEHOLDER/*"
-      ],
-      "Condition":{
-        "Bool":{"aws:SecureTransport":"false"}
-      }
-    }
-  ]
-}
+{"Version":"2012-10-17","Statement":[{"Sid":"DenyNonTLSRequests","Effect":"Deny","Principal":"*","Action":"s3:*","Resource":["arn:aws:s3:::BUCKET_PLACEHOLDER","arn:aws:s3:::BUCKET_PLACEHOLDER/*"],"Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}
 POL
           sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" /tmp/policy.json
           aws s3api put-bucket-policy --bucket "$BUCKET" --policy file:///tmp/policy.json
-          echo "Bucket policy applied (deny non-HTTPS)."
