@@ -5,7 +5,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  DAYS_TO_TRANSITION: 90         # production value
+  DAYS_TO_TRANSITION: "90"
 
 jobs:
   deploy:
@@ -22,9 +22,9 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Create bucket if missing (handles us-east-1)
+      - name: Create bucket if missing (us-east-1)
         run: |
           set -euo pipefail
           if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
@@ -40,13 +40,14 @@ jobs:
             --versioning-configuration Status=Enabled
           echo "Versioning enabled on $BUCKET"
 
-      - name: Apply lifecycle -> GLACIER after 90 days
+      - name: Apply lifecycle -> GLACIER after days
         run: |
-          cat > lifecycle.json <<'EOF'
+          # create lifecycle file with placeholder for days
+          cat > lifecycle.json <<'JSON'
 {
   "Rules": [
     {
-      "ID": "move-to-glacier-after-90-days",
+      "ID": "move-to-glacier",
       "Status": "Enabled",
       "Filter": { "Prefix": "" },
       "Transitions": [
@@ -59,16 +60,16 @@ jobs:
     }
   ]
 }
-EOF
+JSON
+          # replace placeholder using shell variable
           sed -i "s/DAYS_PLACEHOLDER/${DAYS_TO_TRANSITION}/g" lifecycle.json
-          aws s3api put-bucket-lifecycle-configuration \
-            --bucket "$BUCKET" \
-            --lifecycle-configuration file://lifecycle.json
-          echo "Lifecycle applied (transition to GLACIER after ${DAYS_TO_TRANSITION} days)"
+          aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file://lifecycle.json
+          echo "Applied lifecycle (transition to GLACIER after ${DAYS_TO_TRANSITION} days)."
+          cat lifecycle.json
 
       - name: Apply bucket policy (deny non-HTTPS)
         run: |
-          cat > policy.json <<'EOF'
+          cat > policy.json <<'POL'
 {
   "Version":"2012-10-17",
   "Statement":[
@@ -87,10 +88,11 @@ EOF
     }
   ]
 }
-EOF
+POL
           sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" policy.json
           aws s3api put-bucket-policy --bucket "$BUCKET" --policy file://policy.json
-          echo "Bucket policy applied (deny non-HTTPS)"
+          echo "Bucket policy applied (deny non-HTTPS)."
 
       - name: Verify lifecycle config
-        run: aws s3api get-bucket-lifecycle-configuration --bucket "$BUCKET" || echo "No lifecycle found"
+        run: |
+          aws s3api get-bucket-lifecycle-configuration --bucket "$BUCKET" || echo "No lifecycle found"
