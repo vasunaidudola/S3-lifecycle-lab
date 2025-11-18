@@ -15,6 +15,7 @@ jobs:
       AWS_REGION: us-east-1
       BUCKET: ${{ secrets.BUCKET_NAME }}
       DAYS: ${{ github.event.inputs.days }}
+
     steps:
       - name: configure-aws
         uses: aws-actions/configure-aws-credentials@v2
@@ -38,13 +39,11 @@ jobs:
               aws s3api create-bucket --bucket "$BUCKET" --create-bucket-configuration LocationConstraint="$REGION"
             fi
           fi
-          cat > /tmp/lifecycle.json <<'LIFE'
-{"Rules":[{"ID":"transition-to-glacier","Status":"Enabled","Filter":{"Prefix":""},"Transitions":[{"Days":PLACEHOLDER_DAYS,"StorageClass":"GLACIER"}]}]}
-LIFE
-          sed -i "s/PLACEHOLDER_DAYS/${DAYS}/g" /tmp/lifecycle.json
+
+          # write lifecycle JSON (single-line) and apply
+          printf '%s' '{"Rules":[{"ID":"transition-to-glacier","Status":"Enabled","Filter":{"Prefix":""},"Transitions":[{"Days":'"${DAYS}"',"StorageClass":"GLACIER"}]}]}' > /tmp/lifecycle.json
           aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file:///tmp/lifecycle.json
-          cat > /tmp/policy.json <<'POL'
-{"Version":"2012-10-17","Statement":[{"Sid":"DenyNonTLSRequests","Effect":"Deny","Principal":"*","Action":"s3:*","Resource":["arn:aws:s3:::BUCKET_PLACEHOLDER","arn:aws:s3:::BUCKET_PLACEHOLDER/*"],"Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}
-POL
-          sed -i "s/BUCKET_PLACEHOLDER/${BUCKET}/g" /tmp/policy.json
+
+          # write policy JSON (single-line) and apply
+          printf '%s' '{"Version":"2012-10-17","Statement":[{"Sid":"DenyNonTLSRequests","Effect":"Deny","Principal":"*","Action":"s3:*","Resource":["arn:aws:s3:::'"${BUCKET}"'","arn:aws:s3:::'"${BUCKET}"'/*"],"Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}' > /tmp/policy.json
           aws s3api put-bucket-policy --bucket "$BUCKET" --policy file:///tmp/policy.json
